@@ -1,16 +1,63 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   MapContainer,
   TileLayer,
   Marker,
   Circle,
   Popup,
+  useMap,
   useMapEvents
 } from "react-leaflet";
 import L from "leaflet";
 
 const REFRESH_INTERVAL = 3000;
 const MARKER_ANIMATION_MS = REFRESH_INTERVAL;
+const MAX_RADIUS_NM = 250;
+const PRIMARY_BUTTON_STYLE = {
+  background: "#1976d2",
+  border: "none",
+  borderRadius: 6,
+  color: "white",
+  cursor: "pointer",
+  fontWeight: 600,
+  padding: "10px 14px"
+};
+const FIELD_LABEL_STYLE = {
+  color: "#4b5563",
+  display: "block",
+  fontSize: 12,
+  fontWeight: 700,
+  marginBottom: 6,
+  textTransform: "uppercase"
+};
+const RADIUS_INPUT_STYLE = {
+  background: "#f8fafc",
+  border: "1px solid #cbd5e1",
+  borderRadius: 6,
+  boxShadow: "inset 0 1px 2px rgba(15, 23, 42, 0.08)",
+  color: "#111827",
+  fontSize: 15,
+  fontWeight: 600,
+  outline: "none",
+  padding: "9px 10px",
+  width: "100%"
+};
+const TOAST_STYLE = {
+  background: "#111827",
+  borderLeft: "4px solid #f59e0b",
+  borderRadius: 6,
+  bottom: 20,
+  boxShadow: "0 8px 24px rgba(0,0,0,.25)",
+  color: "white",
+  fontSize: 14,
+  fontWeight: 600,
+  left: "50%",
+  maxWidth: "calc(100vw - 32px)",
+  padding: "12px 16px",
+  position: "absolute",
+  transform: "translateX(-50%)",
+  zIndex: 3000
+};
 
 function getAircraftColor(ac) {
   const alt = Number(ac.alt_baro);
@@ -47,6 +94,7 @@ function createAircraftIcon(ac) {
 }
 
 function AnimatedAircraftMarker({ ac, onClick }) {
+  const markerRef = useRef(null);
   const animationFrameRef = useRef(null);
   const displayPositionRef = useRef([
     ac.lat,
@@ -56,6 +104,19 @@ function AnimatedAircraftMarker({ ac, onClick }) {
     ac.lat,
     ac.lon
   ]);
+  const icon = useMemo(
+    () => createAircraftIcon(ac),
+    [ac.alt_baro, ac.track]
+  );
+
+  function handleMarkerClick(event) {
+    onClick?.();
+
+    window.requestAnimationFrame(() => {
+      event.target.openPopup();
+      markerRef.current?.openPopup();
+    });
+  }
 
   useEffect(() => {
     const startedAt = performance.now();
@@ -96,21 +157,30 @@ function AnimatedAircraftMarker({ ac, onClick }) {
 
   return (
     <Marker
+      ref={markerRef}
       position={displayPosition}
-      icon={createAircraftIcon(
-        ac
-      )}
+      icon={icon}
       eventHandlers={{
-        click: onClick
+        click: handleMarkerClick
       }}
     >
       <Popup>
-        <b>
-          {ac.flight ||
-            "Unknown"}
-        </b>
-        <br />
-        {ac.t}
+        <div style={{ minWidth: 160 }}>
+          <b>
+            {ac.flight ||
+              "Unknown"}
+          </b>
+          <br />
+          Type: {ac.t || "-"}
+          <br />
+          Altitude: {ac.alt_baro || "-"} ft
+          <br />
+          Speed: {ac.gs || "-"} kt
+          <br />
+          Heading: {ac.track || "-"}°
+          <br />
+          ICAO: {ac.hex || "-"}
+        </div>
       </Popup>
     </Marker>
   );
@@ -122,6 +192,16 @@ function MapClickHandler({ onMapClick }) {
       onMapClick(e.latlng);
     }
   });
+
+  return null;
+}
+
+function MapRefHandler({ mapRef }) {
+  const map = useMap();
+
+  useEffect(() => {
+    mapRef.current = map;
+  }, [map, mapRef]);
 
   return null;
 }
@@ -145,8 +225,37 @@ export default function FlightTracker() {
   const [expandedFlight, setExpandedFlight] = useState(null);
 
   const [locationInfo, setLocationInfo] = useState("");
+  const [toastMessage, setToastMessage] = useState("");
 
   const mapRef = useRef();
+  const toastTimerRef = useRef(null);
+
+  function showToast(message) {
+    setToastMessage(message);
+    window.clearTimeout(toastTimerRef.current);
+
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage("");
+    }, 4000);
+  }
+
+  function locateAircraft(ac) {
+    const lat = Number(ac.lat);
+    const lon = Number(ac.lon);
+
+    if (!mapRef.current || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return;
+    }
+
+    mapRef.current.flyTo(
+      [lat, lon],
+      11,
+      {
+        animate: true,
+        duration: 0.8
+      }
+    );
+  }
 
   const fetchFlights = async (lat, lng, radiusNm) => {
     try {
@@ -154,6 +263,15 @@ export default function FlightTracker() {
         `https://api.airplanes.live/v2/point/${lat}/${lng}/${radiusNm}`;
 
       const response = await fetch(url);
+
+      if (response.status === 429) {
+        showToast("Too many requests. Please wait for some time.");
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Flight API error: ${response.status}`);
+      }
 
       const data = await response.json();
 
@@ -227,13 +345,31 @@ export default function FlightTracker() {
     return () => clearInterval(timer);
   }, [center, radius]);
 
+  useEffect(() => {
+    return () => {
+      window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
   return (
     <div
       style={{
         display: "flex",
-        height: "100vh"
+        height: "100vh",
+        overflow: "hidden",
+        position: "relative"
       }}
     >
+      {toastMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={TOAST_STYLE}
+        >
+          {toastMessage}
+        </div>
+      )}
+
       <div
         style={{
           flex: 1,
@@ -244,7 +380,7 @@ export default function FlightTracker() {
           style={{
             position: "absolute",
             zIndex: 1000,
-            top: 10,
+            bottom: 10,
             left: 10,
             background: "white",
             padding: 10,
@@ -258,6 +394,7 @@ export default function FlightTracker() {
               onClick={
                 getCurrentLocation
               }
+              style={PRIMARY_BUTTON_STYLE}
             >
               Use My Location
             </button>
@@ -268,21 +405,27 @@ export default function FlightTracker() {
               marginTop: 10
             }}
           >
-            Radius (NM)
+            <label
+              htmlFor="radius-input"
+              style={FIELD_LABEL_STYLE}
+            >
+              Radius (NM)
+            </label>
             <input
+              id="radius-input"
               type="number"
               value={radius}
               onChange={(e) =>
                 setRadius(
-                  Number(
-                    e.target.value
+                  Math.min(
+                    Number(e.target.value),
+                    MAX_RADIUS_NM
                   )
                 )
               }
-              style={{
-                width: 80,
-                marginLeft: 10
-              }}
+              min="1"
+              max={MAX_RADIUS_NM}
+              style={RADIUS_INPUT_STYLE}
             />
           </div>
 
@@ -330,10 +473,9 @@ export default function FlightTracker() {
             height: "100%",
             width: "100%"
           }}
-          whenCreated={(map) => {
-            mapRef.current = map;
-          }}
         >
+          <MapRefHandler mapRef={mapRef} />
+
           <TileLayer
             attribution="© OpenStreetMap"
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -386,30 +528,28 @@ export default function FlightTracker() {
 
       <div
   style={{
-  width: 400,
-  maxWidth: "90vw",
+  width: "min(400px, 90vw)",
   borderLeft: "1px solid #ddd",
   overflowY: "auto",
   background: "#fafafa",
-
-  position:
-    window.innerWidth <= 768
-      ? "absolute"
-      : "relative",
-
+  boxShadow: sidebarOpen
+    ? "-2px 0 12px rgba(0,0,0,.18)"
+    : "none",
+  position: "absolute",
   top: 0,
   right: 0,
   bottom: 0,
-
   zIndex: 1500,
-
+  pointerEvents: sidebarOpen
+    ? "auto"
+    : "none",
   transform:
     sidebarOpen
       ? "translateX(0)"
-      : "translateX(100%)",
+      : "translateX(calc(100% + 12px))",
 
   transition:
-    "transform 0.3s ease"
+    "transform 0.3s ease, box-shadow 0.3s ease"
 }}
 >
   <div style={{ padding: 10 }}>
@@ -551,16 +691,11 @@ export default function FlightTracker() {
 
               <button
                 style={{
+                  ...PRIMARY_BUTTON_STYLE,
                   marginTop: 10
                 }}
                 onClick={() => {
-                  mapRef.current?.flyTo(
-                    [
-                      ac.lat,
-                      ac.lon
-                    ],
-                    11
-                  );
+                  locateAircraft(ac);
                 }}
               >
                 Locate on Map
