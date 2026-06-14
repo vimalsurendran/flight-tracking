@@ -59,6 +59,34 @@ const TOAST_STYLE = {
   zIndex: 3000
 };
 
+function getAircraftKey(ac) {
+  return (
+    ac.hex ||
+    ac.r ||
+    (ac.flight || "").trim() ||
+    `${ac.lat}-${ac.lon}`
+  );
+}
+
+function getFirstAircraft(data) {
+  if (!data || !Array.isArray(data.ac)) {
+    return null;
+  }
+
+  return data.ac[0] || null;
+}
+
+function DetailRow({ label, value, suffix = "" }) {
+  const hasValue = value !== undefined && value !== null && value !== "";
+
+  return (
+    <div>
+      <b>{label}:</b>{" "}
+      {hasValue ? `${value}${suffix}` : "-"}
+    </div>
+  );
+}
+
 function getAircraftColor(ac) {
   const alt = Number(ac.alt_baro);
 
@@ -221,6 +249,7 @@ export default function FlightTracker() {
   const [radius, setRadius] = useState(100);
 
   const [aircraft, setAircraft] = useState([]);
+  const [aircraftDetails, setAircraftDetails] = useState({});
 
   const [expandedFlight, setExpandedFlight] = useState(null);
 
@@ -257,6 +286,72 @@ export default function FlightTracker() {
     );
   }
 
+  async function fetchAircraftLookup(path) {
+    const response = await fetch(
+      `https://api.airplanes.live/v2/${path}`
+    );
+
+    if (response.status === 429) {
+      showToast("Too many requests. Please wait for some time.");
+      return null;
+    }
+
+    if (!response.ok) {
+      throw new Error(`Flight lookup error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return getFirstAircraft(data);
+  }
+
+  async function fetchAircraftDetails(ac) {
+    const aircraftKey = getAircraftKey(ac);
+
+    if (aircraftDetails[aircraftKey]?.status === "loading") {
+      return;
+    }
+
+    setAircraftDetails((current) => ({
+      ...current,
+      [aircraftKey]: {
+        ...current[aircraftKey],
+        status: "loading"
+      }
+    }));
+
+    try {
+      const registration = (ac.r || "").trim();
+      const callsign = (ac.flight || "").trim();
+      const [regDetails, callsignDetails] = await Promise.all([
+        registration
+          ? fetchAircraftLookup(`reg/${encodeURIComponent(registration)}`)
+          : Promise.resolve(null),
+        callsign
+          ? fetchAircraftLookup(`callsign/${encodeURIComponent(callsign)}`)
+          : Promise.resolve(null)
+      ]);
+
+      setAircraftDetails((current) => ({
+        ...current,
+        [aircraftKey]: {
+          reg: regDetails,
+          callsign: callsignDetails,
+          status: "loaded"
+        }
+      }));
+    } catch (err) {
+      console.error("Flight details error:", err);
+      setAircraftDetails((current) => ({
+        ...current,
+        [aircraftKey]: {
+          ...current[aircraftKey],
+          error: "Unable to load more details.",
+          status: "error"
+        }
+      }));
+    }
+  }
+
   const fetchFlights = async (lat, lng, radiusNm) => {
     try {
       const url =
@@ -281,9 +376,11 @@ export default function FlightTracker() {
     }
   };
 
-  function toggleFlight(hex) {
+  function toggleFlight(ac) {
+  const aircraftKey = getAircraftKey(ac);
+
   setExpandedFlight(prev =>
-    prev === hex ? null : hex
+    prev === aircraftKey ? null : aircraftKey
   );
 }
   const getCurrentLocation = () => {
@@ -344,6 +441,22 @@ export default function FlightTracker() {
 
     return () => clearInterval(timer);
   }, [center, radius]);
+
+  useEffect(() => {
+    if (!expandedFlight) {
+      return;
+    }
+
+    const selectedAircraft = aircraft.find(
+      (ac) => getAircraftKey(ac) === expandedFlight
+    );
+
+    if (!selectedAircraft || aircraftDetails[expandedFlight]) {
+      return;
+    }
+
+    fetchAircraftDetails(selectedAircraft);
+  }, [expandedFlight, aircraft, aircraftDetails]);
 
   useEffect(() => {
     return () => {
@@ -518,7 +631,7 @@ export default function FlightTracker() {
                 }
                 ac={ac}
                 onClick={() => {
-                  setExpandedFlight(ac.hex);
+                  setExpandedFlight(getAircraftKey(ac));
                 }}
               />
             );
@@ -575,12 +688,21 @@ export default function FlightTracker() {
 )
     .map(ac => {
 
+      const aircraftKey =
+        getAircraftKey(ac);
       const expanded =
-        expandedFlight === ac.hex;
+        expandedFlight === aircraftKey;
+      const detail =
+        aircraftDetails[aircraftKey];
+      const detailAircraft = {
+        ...ac,
+        ...(detail?.reg || {}),
+        ...(detail?.callsign || {})
+      };
 
       return (
         <div
-          key={ac.hex}
+          key={aircraftKey}
           style={{
             borderBottom:
               "1px solid #e5e5e5"
@@ -588,7 +710,7 @@ export default function FlightTracker() {
         >
           <div
             onClick={() =>
-              toggleFlight(ac.hex)
+              toggleFlight(ac)
             }
             style={{
               cursor: "pointer",
@@ -638,56 +760,116 @@ export default function FlightTracker() {
                 fontSize: 14
               }}
             >
-              <div>
-                <b>ICAO:</b>{" "}
-                {ac.hex}
-              </div>
+              <DetailRow
+                label="ICAO"
+                value={detailAircraft.hex}
+              />
 
-              <div>
-                <b>Registration:</b>{" "}
-                {ac.r || "-"}
-              </div>
+              <DetailRow
+                label="Registration"
+                value={detailAircraft.r}
+              />
 
-              <div>
-                <b>Type:</b>{" "}
-                {ac.t || "-"}
-              </div>
+              <DetailRow
+                label="Callsign"
+                value={detailAircraft.flight}
+              />
 
-              <div>
-                <b>Altitude:</b>{" "}
-                {ac.alt_baro || "-"} ft
-              </div>
+              <DetailRow
+                label="Type"
+                value={detailAircraft.t}
+              />
 
-              <div>
-                <b>Speed:</b>{" "}
-                {ac.gs || "-"} kt
-              </div>
+              <DetailRow
+                label="Description"
+                value={detailAircraft.desc}
+              />
 
-              <div>
-                <b>Heading:</b>{" "}
-                {ac.track || "-"}°
-              </div>
+              <DetailRow
+                label="Operator"
+                value={detailAircraft.ownOp}
+              />
 
-              <div>
-                <b>Squawk:</b>{" "}
-                {ac.squawk || "-"}
-              </div>
+              <DetailRow
+                label="Year"
+                value={detailAircraft.year}
+              />
 
-              <div>
-                <b>Latitude:</b>{" "}
-                {ac.lat}
-              </div>
+              <DetailRow
+                label="Category"
+                value={detailAircraft.category}
+              />
 
-              <div>
-                <b>Longitude:</b>{" "}
-                {ac.lon}
-              </div>
+              <DetailRow
+                label="Altitude"
+                value={detailAircraft.alt_baro}
+                suffix=" ft"
+              />
 
-              <div>
-                <b>Emergency:</b>{" "}
-                {ac.emergency ||
-                  "None"}
-              </div>
+              <DetailRow
+                label="Speed"
+                value={detailAircraft.gs}
+                suffix=" kt"
+              />
+
+              <DetailRow
+                label="Heading"
+                value={detailAircraft.track}
+                suffix="°"
+              />
+
+              <DetailRow
+                label="Squawk"
+                value={detailAircraft.squawk}
+              />
+
+              <DetailRow
+                label="Latitude"
+                value={detailAircraft.lat}
+              />
+
+              <DetailRow
+                label="Longitude"
+                value={detailAircraft.lon}
+              />
+
+              <DetailRow
+                label="Emergency"
+                value={detailAircraft.emergency || "None"}
+              />
+
+              <DetailRow
+                label="Messages"
+                value={detailAircraft.messages}
+              />
+
+              <DetailRow
+                label="Last Seen"
+                value={detailAircraft.seen}
+                suffix="s ago"
+              />
+
+              {detail?.status === "loading" && (
+                <div
+                  style={{
+                    color: "#64748b",
+                    marginTop: 8
+                  }}
+                >
+                  Loading more details...
+                </div>
+              )}
+
+              {detail?.status === "error" && (
+                <div
+                  style={{
+                    color: "#b91c1c",
+                    marginTop: 8
+                  }}
+                >
+                  {detail.error}
+                </div>
+              )}
 
               <button
                 style={{
