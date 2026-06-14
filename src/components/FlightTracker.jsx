@@ -9,7 +9,8 @@ import {
 } from "react-leaflet";
 import L from "leaflet";
 
-const REFRESH_INTERVAL = 15000;
+const REFRESH_INTERVAL = 3000;
+const MARKER_ANIMATION_MS = REFRESH_INTERVAL;
 
 function getAircraftColor(ac) {
   const alt = Number(ac.alt_baro);
@@ -29,20 +30,90 @@ function createAircraftIcon(ac) {
     className: "",
     html: `
       <div
-        style="
-          color:${color};
-          font-size:24px;
-          font-weight:bold;
-          transform:rotate(${ac.track || 0}deg);
-          transform-origin:center center;
-        "
+        class="aircraft-icon"
+        style="color:${color};"
       >
-        ✈
+        <span
+          class="aircraft-icon__plane"
+          style="transform:rotate(${(ac.track || 0) - 90}deg);"
+        >
+          &#9992;
+        </span>
       </div>
     `,
     iconSize: [30, 30],
     iconAnchor: [15, 15]
   });
+}
+
+function AnimatedAircraftMarker({ ac, onClick }) {
+  const animationFrameRef = useRef(null);
+  const displayPositionRef = useRef([
+    ac.lat,
+    ac.lon
+  ]);
+  const [displayPosition, setDisplayPosition] = useState([
+    ac.lat,
+    ac.lon
+  ]);
+
+  useEffect(() => {
+    const startedAt = performance.now();
+    const startPosition = displayPositionRef.current;
+    const nextPosition = [ac.lat, ac.lon];
+
+    window.cancelAnimationFrame(animationFrameRef.current);
+
+    const animate = (now) => {
+      const progress = Math.min(
+        (now - startedAt) / MARKER_ANIMATION_MS,
+        1
+      );
+      const currentPosition = [
+        startPosition[0] +
+          (nextPosition[0] - startPosition[0]) * progress,
+        startPosition[1] +
+          (nextPosition[1] - startPosition[1]) * progress
+      ];
+
+      displayPositionRef.current = currentPosition;
+      setDisplayPosition(currentPosition);
+
+      if (progress < 1) {
+        animationFrameRef.current = window.requestAnimationFrame(animate);
+      } else {
+        displayPositionRef.current = nextPosition;
+        setDisplayPosition(nextPosition);
+      }
+    };
+
+    animationFrameRef.current = window.requestAnimationFrame(animate);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameRef.current);
+    };
+  }, [ac.lat, ac.lon]);
+
+  return (
+    <Marker
+      position={displayPosition}
+      icon={createAircraftIcon(
+        ac
+      )}
+      eventHandlers={{
+        click: onClick
+      }}
+    >
+      <Popup>
+        <b>
+          {ac.flight ||
+            "Unknown"}
+        </b>
+        <br />
+        {ac.t}
+      </Popup>
+    </Marker>
+  );
 }
 
 function MapClickHandler({ onMapClick }) {
@@ -145,6 +216,7 @@ export default function FlightTracker() {
     );
 
     const timer = setInterval(() => {
+      console.log("Refreshing flight data...");
       fetchFlights(
         center.lat,
         center.lng,
@@ -297,33 +369,16 @@ export default function FlightTracker() {
               return null;
 
             return (
-              <Marker
+              <AnimatedAircraftMarker
                 key={
                   ac.hex ||
                   `${ac.lat}-${ac.lon}`
                 }
-                position={[
-                  ac.lat,
-                  ac.lon
-                ]}
-                icon={createAircraftIcon(
-                  ac
-                )}
-                eventHandlers={{
-  click: () => {
-    setExpandedFlight(ac.hex);
-  }
-}}
-              >
-                <Popup>
-                  <b>
-                    {ac.flight ||
-                      "Unknown"}
-                  </b>
-                  <br />
-                  {ac.t}
-                </Popup>
-              </Marker>
+                ac={ac}
+                onClick={() => {
+                  setExpandedFlight(ac.hex);
+                }}
+              />
             );
           })}
         </MapContainer>
